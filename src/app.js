@@ -1,13 +1,14 @@
 import {
-  NETWORKS,
   DEFAULT_NETWORK,
   TIP_ADDRESS,
+  MAINNET_WARNING,
+  MAINNET_PAY_CONFIRM,
   getNetwork,
   isPaymentAddress,
   addressMatchesNetwork,
   isValidAdaAmount,
   normalizeAdaAmount,
-  generateMemoId,
+  finalizeMemo,
   isValidMemo,
   buildCip13Uri,
   buildPayPageUrl,
@@ -15,15 +16,36 @@ import {
   parsePaymentLink,
   describeRequest,
   tipCip13Uri,
+  usdToAda,
+  capLabel,
+  nowCreatedAt,
+  isValidTxHash,
 } from './paylink.js';
-import { lookupPayment } from './koios.js';
+import { checkPaymentStatus } from './payment.js';
+import { parseCheckerConfig } from './checker.js';
 import { fetchAdaUsdRate } from './price.js';
-import { usdToAda } from './paylink.js';
-import { installedWallets, payWithWallet } from './wallet.js';
+import { installedWallets, payWithWallet, testnetAmbiguityWarning } from './wallet.js';
+import { describeWalletError } from './wallet-errors.js';
+import { renderLookupStatus } from './ui-status.js';
+import { initialNetwork, networkToPersist } from './network-pref.js';
 
 const $ = (id) => document.getElementById(id);
 const STORAGE_SAVED = 'ada-pay-links.saved';
 const STORAGE_NET = 'ada-pay-links.network';
+const STORAGE_CHECKER = 'ada-pay-links.checker';
+
+let checkerConfig = {};
+
+async function loadCheckerConfig() {
+  let fileCfg = {};
+  try {
+    const res = await fetch(new URL('./checker-config.json', window.location.href));
+    if (res.ok) fileCfg = parseCheckerConfig(await res.text());
+  } catch { /* optional file */ }
+  let stored = {};
+  try { stored = parseCheckerConfig(localStorage.getItem(STORAGE_CHECKER) || ''); } catch { /* ignore */ }
+  checkerConfig = { ...fileCfg, ...stored };
+}
 
 function qrInto(el, text) {
   el.innerHTML = '';
@@ -33,7 +55,10 @@ function qrInto(el, text) {
     qr.make();
     el.innerHTML = qr.createSvgTag({ cellSize: 5, margin: 12, scalable: true });
   } catch {
-    el.innerHTML = '<p class="error">QR rendering failed — use the link text instead.</p>';
+    const p = document.createElement('p');
+    p.className = 'error';
+    p.textContent = 'QR rendering failed — use the link text instead.';
+    el.appendChild(p);
   }
 }
 
@@ -65,16 +90,24 @@ function setNetwork(id, { persist = true } = {}) {
   if (!getNetwork(id)) id = DEFAULT_NETWORK;
   $('network').value = id;
   if (persist) {
-    try { localStorage.setItem(STORAGE_NET, id); } catch { /* ignore */ }
+    const stored = networkToPersist(id);
+    if (stored) {
+      try { localStorage.setItem(STORAGE_NET, stored); } catch { /* ignore */ }
+    }
   }
   const net = getNetwork(id);
   const banner = $('net-banner');
   if (net.kind === 'mainnet') {
     banner.classList.add('mainnet');
-    banner.textContent = 'Mainnet is selected, but this project is still in testing and is not audited. Only send real ADA if you accept that risk. Double-check the receive address.';
+    banner.textContent = MAINNET_WARNING + '. This page never holds your funds or any team funds. Double-check the receive address and the network in your wallet before paying.';
   } else {
     banner.classList.remove('mainnet');
-    banner.textContent = 'This is a testnet build, in testing and unaudited. Use ' + net.label + '. Do not send real mainnet funds unless you fully understand the risk.';
+    banner.textContent =
+      'This is a testnet build, in testing and unaudited. Use ' +
+      net.label +
+      '. Preprod and Preview are different networks with the same address prefix — set your wallet to ' +
+      net.label +
+      '. Default is Preprod until real-wallet tests are complete.';
   }
 }
 
@@ -82,42 +115,16 @@ function payPageBase() {
   return window.location.origin + window.location.pathname;
 }
 
-function formatStatus(result) {
-  const ada = result.receivedLovelace
-    ? (Number(result.receivedLovelace) / 1_000_000).toString()
-    : '0';
-  if (result.status === 'paid') {
-    return {
-      className: 'status ok',
-      text: 'Paid ✓',
-      detail:
-        'At least the requested ADA arrived at the receive address with a matching CIP-20 memo' +
-        (result.txHash ? ' in transaction ' + result.txHash : '') +
-        (result.explorerUrl ? '. ' : '.') +
-        (result.explorerUrl ? '<a href="' + result.explorerUrl + '" rel="noopener" target="_blank">View on ' + (getNetwork(result.network)?.explorerName || 'explorer') + '</a>' : ''),
-    };
+function showLookup(result, statusEl, detailEl) {
+  if (result && !result.address && result.network) {
+    /* address is optional on paid results; unreachable already has explorerUrl */
   }
-  if (result.status === 'underpaid') {
-    return {
-      className: 'status warn',
-      text: 'Memo found, amount short',
-      detail:
-        'A transaction with this memo paid ' + ada + ' ADA, which is less than requested' +
-        (result.explorerUrl ? '. <a href="' + result.explorerUrl + '" rel="noopener" target="_blank">View transaction</a>' : '.'),
-    };
-  }
-  return {
-    className: 'status',
-    text: 'Unpaid',
-    detail: result.note || 'No matching transaction was found in the recent history for this address and memo on ' + (getNetwork(result.network)?.label || 'the selected network') + '.',
-  };
+  renderLookupStatus(result, statusEl, detailEl, document);
 }
 
-function showLookup(result, statusEl, detailEl) {
-  const view = formatStatus(result);
-  statusEl.className = view.className;
-  statusEl.textContent = view.text;
-  detailEl.innerHTML = view.detail;
+function confirmMainnetIfNeeded() {
+  if (getNetwork(currentNetwork())?.kind !== 'mainnet') return true;
+  return window.confirm(MAINNET_PAY_CONFIRM);
 }
 
 /* ---------- tip box (on by default, unlocks nothing) ---------- */
@@ -127,12 +134,13 @@ $('tip-copy').addEventListener('click', function () {
   copyText(TIP_ADDRESS, this);
 });
 
-/* ---------- network switch ---------- */
-try {
-  const saved = localStorage.getItem(STORAGE_NET);
-  if (saved && getNetwork(saved)) $('network').value = saved;
-} catch { /* ignore */ }
-setNetwork(currentNetwork(), { persist: false });
+/* ---------- network switch: never restore mainnet ---------- */
+(function initNetwork() {
+  let saved = null;
+  try { saved = localStorage.getItem(STORAGE_NET); } catch { /* ignore */ }
+  const link = parsePayPageUrl(window.location.href);
+  setNetwork(initialNetwork({ linkNetwork: link && link.network, saved }), { persist: false });
+}());
 $('network').addEventListener('change', () => setNetwork(currentNetwork()));
 
 /* ---------- USD conversion ---------- */
@@ -161,6 +169,10 @@ $('gen-form').addEventListener('submit', (ev) => {
   $('gen-error').textContent = '';
   try {
     const network = currentNetwork();
+    if (getNetwork(network)?.kind === 'mainnet' && !window.confirm(MAINNET_PAY_CONFIRM)) {
+      $('gen-error').textContent = 'Mainnet link not created.';
+      return;
+    }
     const address = $('f-address').value.trim();
     if (!isPaymentAddress(address)) throw new Error('Enter a valid Cardano payment address (addr1… or addr_test1…).');
     if (!addressMatchesNetwork(address, network)) {
@@ -173,13 +185,13 @@ $('gen-form').addEventListener('submit', (ev) => {
     const amountRaw = $('f-amount').value;
     const amount = amountRaw.trim() ? normalizeAdaAmount(amountRaw) : null;
     if (amountRaw.trim() && !isValidAdaAmount(amountRaw)) {
-      throw new Error('Enter a valid ADA amount with at most 6 decimal places, or leave it blank for an open-amount link.');
+      throw new Error('Enter an ADA amount of at least 1 and at most 45,000,000,000, or leave it blank for an open-amount link.');
     }
-    let memo = $('f-memo').value.trim();
-    if (!memo) memo = generateMemoId();
+    const memo = finalizeMemo($('f-memo').value);
     if (!isValidMemo(memo)) throw new Error('Enter a shorter memo / invoice id (max 200 characters).');
-    const label = $('f-label').value.trim() || undefined;
-    const request = { network, address, amount, memo, label };
+    const label = capLabel($('f-label').value) || undefined;
+    const created = nowCreatedAt();
+    const request = { network, address, amount, memo, label, created };
     const pageUrl = buildPayPageUrl(payPageBase(), request);
     const cip13 = buildCip13Uri({ address, amount });
     lastGenerated = { url: pageUrl, cip13, request, createdAt: Date.now() };
@@ -193,7 +205,7 @@ $('gen-form').addEventListener('submit', (ev) => {
     $('gen-result').classList.remove('hidden');
     $('gen-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
-    $('gen-error').textContent = e.message || String(e);
+    $('gen-error').textContent = describeWalletError(e) === 'The wallet reported an error.' ? (e.message || String(e)) : (e.message || describeWalletError(e));
   }
 });
 
@@ -268,12 +280,13 @@ $('ver-form').addEventListener('submit', async (ev) => {
     if (!addressMatchesNetwork(parsed.address, parsed.network)) {
       throw new Error('The address does not match the selected network.');
     }
-    const result = await lookupPayment(parsed);
+    const result = await checkPaymentStatus(parsed, { config: checkerConfig });
+    if (result && !result.address) result.address = parsed.address;
     showLookup(result, $('ver-status'), $('ver-detail'));
   } catch (e) {
     $('ver-status').className = 'status';
     $('ver-status').textContent = 'Lookup failed';
-    $('ver-detail').textContent = e.message || String(e);
+    $('ver-detail').textContent = e.message || describeWalletError(e);
   }
 });
 
@@ -281,6 +294,14 @@ $('ver-form').addEventListener('submit', async (ev) => {
 function showDesk() {
   $('payview').classList.add('hidden');
   $('desk').classList.remove('hidden');
+}
+
+function setPayHint(request) {
+  const hint = $('pv-network-hint');
+  if (!hint) return;
+  const warning = testnetAmbiguityWarning(request.network);
+  hint.textContent = warning || (getNetwork(request.network)?.kind === 'mainnet' ? MAINNET_WARNING : '');
+  hint.classList.toggle('hidden', !hint.textContent);
 }
 
 function renderPayView(request) {
@@ -299,6 +320,7 @@ function renderPayView(request) {
   $('pv-copy').onclick = function () { copyText(pageUrl, this); };
   $('pv-amount-wrap').classList.toggle('hidden', !!request.amount);
   if (request.amount) $('pv-amount').value = request.amount;
+  setPayHint(request);
 
   const wallets = installedWallets();
   const box = $('pv-wallets');
@@ -314,22 +336,40 @@ function renderPayView(request) {
       $('pv-pay-status').textContent = 'Connecting ' + w.name + '… confirm the transaction in your wallet.';
       try {
         const amount = request.amount || $('pv-amount').value.trim();
-        const { txHash } = await payWithWallet({
+        const { txHash, inspection } = await payWithWallet({
           walletId: w.id,
           network: request.network,
           address: request.address,
           amount,
           memo: request.memo,
+          config: checkerConfig,
+          confirmMainnet: () => window.confirm(MAINNET_PAY_CONFIRM),
+          onTestnetWarning: (info) => window.confirm(info.warning),
         });
         const net = getNetwork(request.network);
         $('pv-pay-status').className = 'status ok';
-        $('pv-pay-status').innerHTML =
-          'Submitted. Transaction ' + txHash +
-          (net ? ' — <a href="' + net.explorerTx(txHash) + '" rel="noopener" target="_blank">view on ' + net.explorerName + '</a>' : '') +
-          '. It may take a few moments to show as paid.';
+        $('pv-pay-status').textContent = 'Submitted.';
+        if (isValidTxHash(txHash)) {
+          $('pv-pay-status').appendChild(document.createTextNode(' Transaction ' + txHash));
+          if (net) {
+            $('pv-pay-status').appendChild(document.createTextNode(' — '));
+            const a = document.createElement('a');
+            a.href = net.explorerTx(txHash);
+            a.rel = 'noopener';
+            a.target = '_blank';
+            a.textContent = 'view on ' + net.explorerName;
+            $('pv-pay-status').appendChild(a);
+          }
+        }
+        $('pv-pay-status').appendChild(document.createTextNode('. It may take a few moments to show as paid.'));
+        if (inspection && inspection.warning && !inspection.mismatchLikely) {
+          const p = document.createElement('span');
+          p.textContent = ' ' + inspection.warning;
+          $('pv-pay-status').appendChild(p);
+        }
       } catch (e) {
         $('pv-pay-status').className = 'status';
-        $('pv-pay-status').textContent = e.message || String(e);
+        $('pv-pay-status').textContent = describeWalletError(e);
       }
     });
     box.appendChild(btn);
@@ -340,11 +380,12 @@ function renderPayView(request) {
     $('pv-status').textContent = 'Checking on-chain…';
     $('pv-ver-detail').textContent = '';
     try {
-      const result = await lookupPayment(request);
+      const result = await checkPaymentStatus(request, { config: checkerConfig });
+      if (result && !result.address) result.address = request.address;
       showLookup(result, $('pv-status'), $('pv-ver-detail'));
     } catch (e) {
       $('pv-status').textContent = 'Lookup failed';
-      $('pv-ver-detail').textContent = e.message || String(e);
+      $('pv-ver-detail').textContent = e.message || describeWalletError(e);
     }
   };
 }
@@ -365,5 +406,6 @@ function bootFromQuery() {
     showDesk();
   }
 }
-bootFromQuery();
+
+loadCheckerConfig().finally(bootFromQuery);
 window.addEventListener('popstate', bootFromQuery);

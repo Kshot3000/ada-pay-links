@@ -162,3 +162,6 @@ footer {
 .tip-box h2 { margin: 0 0 6px; font-size: 16px; color: var(--text); }
 .actions { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 8px; }
 .wallet-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+
+.tag{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);font-size:11px;font-style:normal;font-weight:600;color:var(--warn);vertical-align:middle;letter-spacing:.02em}
+.banner-inline{margin:8px 0;padding:8px 10px;border-radius:8px;background:#1a1630;color:var(--warn);font-size:13px}

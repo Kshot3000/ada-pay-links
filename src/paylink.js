@@ -12,6 +12,13 @@ export const LOVELACE_PER_ADA = 1_000_000n;
 export const CIP20_LABEL = 674;
 export const CIP20_MAX_BYTES = 64;
 export const MAX_MEMO_CHARS = 200;
+export const MAX_LABEL_CHARS = 60;
+/** Minimum payable amount (about one min-UTxO of ADA). */
+export const MIN_ADA = '1';
+/** Current maximum ADA supply. */
+export const MAX_ADA = '45000000000';
+export const MIN_ADA_LOVELACE = 1_000_000n;
+export const MAX_ADA_LOVELACE = 45_000_000_000n * LOVELACE_PER_ADA;
 
 /** Developer tip address (mainnet). Unlocks nothing; the tool is free. */
 export const TIP_ADDRESS =
@@ -28,6 +35,7 @@ export const NETWORKS = {
     meshNetwork: 'preprod',
     lucidNetwork: 'Preprod',
     explorerTx: (hash) => 'https://preprod.cardanoscan.io/transaction/' + hash,
+    explorerAddress: (addr) => 'https://preprod.cardanoscan.io/address/' + addr,
     explorerName: 'Cardanoscan (Preprod)',
   },
   preview: {
@@ -40,6 +48,7 @@ export const NETWORKS = {
     meshNetwork: 'preview',
     lucidNetwork: 'Preview',
     explorerTx: (hash) => 'https://preview.cardanoscan.io/transaction/' + hash,
+    explorerAddress: (addr) => 'https://preview.cardanoscan.io/address/' + addr,
     explorerName: 'Cardanoscan (Preview)',
   },
   mainnet: {
@@ -52,11 +61,58 @@ export const NETWORKS = {
     meshNetwork: 'api',
     lucidNetwork: 'Mainnet',
     explorerTx: (hash) => 'https://cardanoscan.io/transaction/' + hash,
+    explorerAddress: (addr) => 'https://cardanoscan.io/address/' + addr,
     explorerName: 'Cardanoscan',
   },
 };
 
 export const DEFAULT_NETWORK = 'preprod';
+
+/** Shown whenever Mainnet is selected. Mainnet is supported, but the software is unaudited. */
+export const MAINNET_WARNING = 'Mainnet: real ADA, unaudited software';
+export const MAINNET_PAY_CONFIRM = 'This sends real ADA';
+
+
+/**
+ * Block a CIP-30 wallet that is on the wrong network.
+ * CIP-30 only reports network id 0 (testnet) or 1 (mainnet), so Preprod vs Preview
+ * cannot be distinguished this way — address prefixes (addr vs addr_test) still are.
+ * Returns an error message, or null if the wallet may proceed.
+ */
+export function walletNetworkMismatch({ walletNetworkId, changeAddress, network } = {}) {
+  const net = getNetwork(network);
+  if (!net) return 'Unknown network';
+  const id = Number(walletNetworkId);
+  if (!Number.isInteger(id) || (id !== 0 && id !== 1)) {
+    return 'The wallet did not report a valid CIP-30 network id. Switch to ' + net.label + ' and try again.';
+  }
+  if (id !== net.networkId) {
+    if (net.kind === 'mainnet') {
+      return 'This wallet is on a testnet, but this payment is for Mainnet. Switch the wallet to Mainnet and try again.';
+    }
+    return (
+      'This wallet is on mainnet, but this payment is for ' +
+      net.label +
+      '. Switch the wallet to ' +
+      net.label +
+      ' and try again. Preprod and Preview are both testnets — CIP-30 cannot tell them apart, so confirm the wallet is on the same testnet as this page.'
+    );
+  }
+  if (changeAddress && isPaymentAddress(changeAddress) && !addressMatchesNetwork(changeAddress, network)) {
+    return (
+      'The connected wallet address does not match ' +
+      net.label +
+      ' (addr vs addr_test). Switch the wallet network and try again.'
+    );
+  }
+  return null;
+}
+
+export function assertWalletNetwork(opts) {
+  const msg = walletNetworkMismatch(opts);
+  if (msg) throw new Error(msg);
+}
+
 
 /* ---------------- bech32 (BIP-173, no 90-char limit — Cardano CIP-5) ---------------- */
 
@@ -107,39 +163,116 @@ export function decodeBech32(str) {
   return { hrp, words: data.slice(0, -6) };
 }
 
-export function isPaymentAddress(str) {
+function convertBits(data, fromBits, toBits, pad) {
+  let acc = 0;
+  let bits = 0;
+  const maxv = (1 << toBits) - 1;
+  const out = [];
+  for (const value of data) {
+    if (value < 0 || value >> fromBits) return null;
+    acc = (acc << fromBits) | value;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      out.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0) out.push((acc << (toBits - bits)) & maxv);
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv)) {
+    return null;
+  }
+  return out;
+}
+
+/**
+ * Decode a Shelley payment address and check CIP-19 header + payload length.
+ * Returns { hrp, type, networkId, bytes } or null. Stake/reward addresses are rejected.
+ */
+export function decodePaymentAddress(str) {
   const d = decodeBech32(str);
-  if (!d) return false;
-  return d.hrp === 'addr' || d.hrp === 'addr_test';
+  if (!d) return null;
+  if (d.hrp !== 'addr' && d.hrp !== 'addr_test') return null;
+  const bytes = convertBits(d.words, 5, 8, false);
+  if (!bytes || bytes.length < 29) return null;
+  const header = bytes[0];
+  const type = header >> 4;
+  const networkId = header & 0x0f;
+  if (d.hrp === 'addr' && networkId !== 1) return null;
+  if (d.hrp === 'addr_test' && networkId !== 0) return null;
+  // CIP-19 payment types: 0-3 base (57 bytes), 4-5 pointer (>= 32), 6-7 enterprise (29).
+  // Type 14 is a reward/stake account — not a payment address.
+  if (type >= 0 && type <= 3) {
+    if (bytes.length !== 57) return null;
+  } else if (type === 4 || type === 5) {
+    if (bytes.length < 32 || bytes.length > 64) return null;
+  } else if (type === 6 || type === 7) {
+    if (bytes.length !== 29) return null;
+  } else {
+    return null;
+  }
+  return { hrp: d.hrp, type, networkId, bytes };
+}
+
+export function isPaymentAddress(str) {
+  return !!decodePaymentAddress(str);
 }
 
 /** 'mainnet' | 'testnet' | null (not a payment address). */
 export function addressNetworkKind(str) {
-  const d = decodeBech32(str);
+  const d = decodePaymentAddress(str);
   if (!d) return null;
-  if (d.hrp === 'addr') return 'mainnet';
-  if (d.hrp === 'addr_test') return 'testnet';
+  if (d.hrp === 'addr' && d.networkId === 1) return 'mainnet';
+  if (d.hrp === 'addr_test' && d.networkId === 0) return 'testnet';
   return null;
+}
+
+export function addressMatchesNetwork(address, networkId) {
+  const net = getNetwork(networkId);
+  if (!net) return false;
+  const d = decodePaymentAddress(address);
+  if (!d) return false;
+  if (d.hrp !== net.addressHrp) return false;
+  return net.kind === 'mainnet' ? d.networkId === 1 : d.networkId === 0;
 }
 
 export function getNetwork(id) {
   return NETWORKS[id] || null;
 }
 
-export function addressMatchesNetwork(address, networkId) {
-  const net = getNetwork(networkId);
-  if (!net) return false;
-  const d = decodeBech32(address);
-  return !!d && d.hrp === net.addressHrp;
-}
-
 /* ---------------- amounts ---------------- */
 
-export function isValidAdaAmount(str) {
+/** Well-formed positive ADA with at most 6 decimal places (any size). */
+export function isWellFormedAdaAmount(str) {
   if (typeof str !== 'string') return false;
   const s = str.trim();
   if (!/^(0|[1-9]\d*)(\.\d{1,6})?$/.test(s)) return false;
   return /[1-9]/.test(s);
+}
+
+/**
+ * A payable ADA amount: well-formed, at least 1 ADA, and at most the 45 billion
+ * ADA total supply.
+ */
+export function isAllowedPaymentAmount(str) {
+  if (!isWellFormedAdaAmount(str)) return false;
+  try {
+    const lovelace = adaAmountToLovelace(str);
+    return lovelace >= MIN_ADA_LOVELACE && lovelace <= MAX_ADA_LOVELACE;
+  } catch {
+    return false;
+  }
+}
+
+export function isValidAdaAmount(str) {
+  return isAllowedPaymentAmount(str);
+}
+
+function adaAmountToLovelace(str) {
+  const norm = normalizeAdaAmount(str);
+  const [w, f = ''] = norm.split('.');
+  const frac = (f + '000000').slice(0, 6);
+  return BigInt(w) * LOVELACE_PER_ADA + BigInt(frac);
 }
 
 export function isValidUsdAmount(str) {
@@ -160,11 +293,15 @@ export function normalizeAdaAmount(str) {
 }
 
 export function adaToLovelace(str) {
-  if (!isValidAdaAmount(str)) throw new Error('Invalid ADA amount');
-  const norm = normalizeAdaAmount(str);
-  const [w, f = ''] = norm.split('.');
-  const frac = (f + '000000').slice(0, 6);
-  return BigInt(w) * LOVELACE_PER_ADA + BigInt(frac);
+  if (!isWellFormedAdaAmount(str)) throw new Error('Invalid ADA amount');
+  return adaAmountToLovelace(str);
+}
+
+export function paymentAmountToLovelace(str) {
+  if (!isAllowedPaymentAmount(str)) {
+    throw new Error('ADA amount must be at least 1 and at most 45,000,000,000');
+  }
+  return adaAmountToLovelace(str);
 }
 
 export function lovelaceToAda(lovelace) {
@@ -187,11 +324,17 @@ export function usdToAda(usdStr, adaUsdRate) {
   if (!isValidUsdAmount(usdStr)) throw new Error('Invalid USD amount');
   const usd = Number(usdStr);
   if (!Number.isFinite(usd) || usd <= 0) throw new Error('Invalid USD amount');
-  const lovelace = Math.round((usd / adaUsdRate) * Number(LOVELACE_PER_ADA));
-  if (!Number.isFinite(lovelace) || lovelace < 1) {
+  // Use integer rounding in lovelace. The USD and rate are Number values;
+  // we still clamp the result to the allowed payment range with BigInt.
+  const raw = (usd / adaUsdRate) * Number(LOVELACE_PER_ADA);
+  if (!Number.isFinite(raw) || raw < 1) {
     throw new Error('USD amount is too small to equal 1 lovelace at this price');
   }
-  return lovelaceToAda(BigInt(lovelace));
+  const lovelace = BigInt(Math.round(raw));
+  if (lovelace < MIN_ADA_LOVELACE || lovelace > MAX_ADA_LOVELACE) {
+    throw new Error('ADA amount must be at least 1 and at most 45,000,000,000');
+  }
+  return lovelaceToAda(lovelace);
 }
 
 /** Approximate USD value of an ADA amount at a market rate, 2 decimal dollars. */
@@ -258,6 +401,46 @@ export function generateMemoId() {
   return 'APL-' + hex;
 }
 
+/** Short random suffix so a reused invoice id cannot match an older payment. */
+export function generateMemoSuffix() {
+  const c = globalThis.crypto;
+  if (!c || !c.getRandomValues) throw new Error('WebCrypto unavailable');
+  const bytes = new Uint8Array(3);
+  c.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Auto-generate a memo if needed, then append a short unique suffix.
+ * Required and auto memos both get the suffix.
+ */
+export function finalizeMemo(userMemo) {
+  const base = normalizeMemo(userMemo || '') || generateMemoId();
+  const suffix = generateMemoSuffix();
+  let memo = base + '-' + suffix;
+  if (memo.length > MAX_MEMO_CHARS) {
+    const keep = MAX_MEMO_CHARS - 1 - suffix.length;
+    if (keep < 1) throw new Error('Memo is too long');
+    memo = base.slice(0, keep) + '-' + suffix;
+  }
+  if (!isValidMemo(memo)) throw new Error('Invalid memo / invoice id');
+  return memo;
+}
+
+export function isValidTxHash(hash) {
+  return typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash);
+}
+
+export function isValidCreatedAt(value) {
+  if (value === undefined || value === null || value === '') return false;
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(n) && n > 0 && n < 1e12;
+}
+
+export function nowCreatedAt() {
+  return Math.floor(Date.now() / 1000);
+}
+
 /* ---------------- CIP-13 URIs ---------------- */
 
 export function buildCip13Uri({ address, amount } = {}) {
@@ -308,9 +491,14 @@ export function parseCip13Uri(uri) {
 
 /* ---------------- hosted pay-page links ---------------- */
 
-const PAGE_KEYS = ['network', 'address', 'amount', 'memo', 'label'];
+const PAGE_KEYS = ['network', 'address', 'amount', 'memo', 'label', 'created'];
 
-export function buildPayPageQuery({ network, address, amount, memo, label } = {}) {
+export function capLabel(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim().slice(0, MAX_LABEL_CHARS);
+}
+
+export function buildPayPageQuery({ network, address, amount, memo, label, created } = {}) {
   const net = getNetwork(network);
   if (!net) throw new Error('Unknown network');
   if (!isPaymentAddress(address)) throw new Error('Invalid Cardano payment address');
@@ -325,21 +513,27 @@ export function buildPayPageQuery({ network, address, amount, memo, label } = {}
   qs.set('network', net.id);
   qs.set('address', address);
   if (amount !== undefined && amount !== null && String(amount).trim() !== '') {
-    if (!isValidAdaAmount(String(amount))) throw new Error('Invalid ADA amount');
+    if (!isValidAdaAmount(String(amount))) {
+      throw new Error('ADA amount must be at least 1 and at most 45,000,000,000');
+    }
     qs.set('amount', normalizeAdaAmount(String(amount)));
   }
   const m = normalizeMemo(memo || '');
   if (!isValidMemo(m)) throw new Error('A memo / invoice id is required so the payment can be matched');
   qs.set('memo', m);
-  if (label) qs.set('label', String(label).trim().slice(0, 60));
+  const lab = capLabel(label);
+  if (lab) qs.set('label', lab);
+  const createdAt = isValidCreatedAt(created) ? Number(created) : nowCreatedAt();
+  qs.set('created', String(createdAt));
   return qs.toString();
 }
 
 export function buildPayPageUrl(base, request) {
   if (typeof base !== 'string' || !base) throw new Error('Missing pay-page base URL');
   const q = buildPayPageQuery(request);
-  const sep = base.includes('?') ? '&' : (base.endsWith('?') ? '' : '?');
-  return base + sep + q;
+  const trimmed = String(base).replace(/\?+$/, '');
+  const sep = trimmed.includes('?') ? '&' : '?';
+  return trimmed + sep + q;
 }
 
 export function parsePayPageUrl(url) {
@@ -367,12 +561,16 @@ export function parsePayPageUrl(url) {
   }
   const memo = q.has('memo') ? q.get('memo') : null;
   if (memo !== null && memo !== '' && !isValidMemo(memo)) return null;
+  const createdRaw = q.has('created') ? q.get('created') : null;
+  const created = isValidCreatedAt(createdRaw) ? Number(createdRaw) : null;
+  const label = capLabel(q.get('label'));
   return {
     network,
     address,
     amount: amount && isValidAdaAmount(amount) ? normalizeAdaAmount(amount) : null,
     memo: memo ? normalizeMemo(memo) : null,
-    label: q.get('label') || null,
+    label: label || null,
+    created,
   };
 }
 
@@ -390,6 +588,7 @@ export function parsePaymentLink(text) {
     amount: cip.amount,
     memo: null,
     label: null,
+    created: null,
   };
 }
 
@@ -431,8 +630,18 @@ export function memoMatches(messages, memo) {
   const want = normalizeMemo(memo);
   if (!want) return false;
   const lines = (messages || []).map(normalizeMemo);
-  if (lines.some((l) => l === want)) return true;
-  if (normalizeMemo(lines.join('')) === want) return true;
+  // Exact full-memo match over a consecutive run of CIP-20 lines. A memo
+  // longer than 64 bytes is split across lines; a wallet may also append
+  // an extra line (e.g. "Sent from Eternl"). Joining the whole array
+  // would miss a real payment, so we test every consecutive run.
+  for (let i = 0; i < lines.length; i++) {
+    let acc = '';
+    for (let j = i; j < lines.length; j++) {
+      acc += lines[j];
+      if (acc === want) return true;
+      if (acc.length > want.length) break;
+    }
+  }
   return false;
 }
 
@@ -463,20 +672,47 @@ export function lovelaceReceivedByAddress(tx, address) {
  * Judge one Koios-style tx_info row against a payment request.
  * amountLovelace may be null for an open-amount link (any positive ADA with the memo).
  */
-export function matchPayment(tx, { address, amountLovelace, memo } = {}) {
-  const received = lovelaceReceivedByAddress(tx, address);
-  const messages = extractCip20Messages(tx && tx.metadata);
-  const memoOk = memoMatches(messages, memo);
+export function txOccurredAt(tx) {
+  if (!tx || typeof tx !== 'object') return null;
+  const v = tx.tx_timestamp ?? tx.block_time ?? tx.block_time_unix;
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function txBlockHeight(tx) {
+  if (!tx || typeof tx !== 'object') return null;
+  const v = tx.block_height ?? tx.block_no;
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isInteger(n) ? n : null;
+}
+
+/** True when this tx was already on-chain before the payment link was created. */
+export function txBeforeLinkCreation(tx, created) {
+  if (!isValidCreatedAt(created)) return false;
+  const when = txOccurredAt(tx);
+  if (when === null) return false;
+  return when < Number(created);
+}
+
+export function matchPayment(tx, { address, amountLovelace, memo, created } = {}) {
+  const tooOld = txBeforeLinkCreation(tx, created);
+  const received = tooOld ? 0n : lovelaceReceivedByAddress(tx, address);
+  const messages = tooOld ? [] : extractCip20Messages(tx && tx.metadata);
+  const memoOk = !tooOld && memoMatches(messages, memo);
   const need = amountLovelace === undefined || amountLovelace === null || amountLovelace === ''
-    ? 1n
+    ? MIN_ADA_LOVELACE
     : BigInt(amountLovelace);
   const amountOk = received >= need;
+  const hash = tx && isValidTxHash(tx.tx_hash) ? tx.tx_hash : (tx && tx.tx_hash) || null;
   return {
-    txHash: (tx && tx.tx_hash) || null,
+    txHash: hash,
     receivedLovelace: received.toString(),
     memoMatched: memoOk,
     amountMatched: amountOk,
     paid: !!(memoOk && amountOk && received > 0n),
+    tooOld,
   };
 }
 
@@ -488,6 +724,8 @@ export function findMatchingPayment(txs, request) {
   const list = Array.isArray(txs) ? txs : [];
   let close = null;
   for (const tx of list) {
+    // Newest first is typical. Once we pass the link's creation time, stop.
+    if (txBeforeLinkCreation(tx, request && request.created)) break;
     const r = matchPayment(tx, request);
     if (r.paid) return { status: 'paid', ...r };
     if (r.memoMatched && !close) close = r;

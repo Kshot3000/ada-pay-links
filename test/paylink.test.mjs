@@ -10,6 +10,8 @@ import {
   addressNetworkKind,
   addressMatchesNetwork,
   isValidAdaAmount,
+  isWellFormedAdaAmount,
+  isAllowedPaymentAmount,
   isValidUsdAmount,
   normalizeAdaAmount,
   adaToLovelace,
@@ -20,6 +22,13 @@ import {
   normalizeMemo,
   splitCip20Msg,
   generateMemoId,
+  generateMemoSuffix,
+  finalizeMemo,
+  capLabel,
+  decodePaymentAddress,
+  walletNetworkMismatch,
+  MAINNET_WARNING,
+  MAINNET_PAY_CONFIRM,
   buildCip13Uri,
   parseCip13Uri,
   buildPayPageQuery,
@@ -109,10 +118,20 @@ describe('bech32 and addresses', () => {
 
 describe('ADA amount conversion', () => {
   it('accepts well-formed positive ADA amounts with at most 6 decimals', () => {
+    assert.equal(isWellFormedAdaAmount('1'), true);
+    assert.equal(isWellFormedAdaAmount('0.000001'), true);
+    assert.equal(isWellFormedAdaAmount('25.50'), true);
+    assert.equal(isWellFormedAdaAmount('1000000'), true);
+  });
+
+  it('rejects payment amounts under 1 ADA or over the 45 billion ADA supply', () => {
+    assert.equal(isAllowedPaymentAmount('1'), true);
     assert.equal(isValidAdaAmount('1'), true);
-    assert.equal(isValidAdaAmount('0.000001'), true);
-    assert.equal(isValidAdaAmount('25.50'), true);
-    assert.equal(isValidAdaAmount('1000000'), true);
+    assert.equal(isAllowedPaymentAmount('0.999999'), false);
+    assert.equal(isAllowedPaymentAmount('0.000001'), false);
+    assert.equal(isAllowedPaymentAmount('45000000000'), true);
+    assert.equal(isAllowedPaymentAmount('45000000000.000001'), false);
+    assert.throws(() => buildCip13Uri({ address: TESTNET_ADDR, amount: '0.5' }), /at least 1|Invalid ADA amount/);
   });
 
   it('rejects zero, negative, too many decimals, commas, and scientific notation', () => {
@@ -222,6 +241,8 @@ describe('pay-page link building and parsing', () => {
     assert.equal(parsed.amount, '5');
     assert.equal(parsed.memo, 'INV-42');
     assert.equal(parsed.label, 'Test Shop');
+    assert.equal(typeof parsed.created, 'number');
+    assert.ok(parsed.created > 0);
   });
 
   it('parses the same request from parsePaymentLink as from parsePayPageUrl', () => {
@@ -275,6 +296,7 @@ describe('pay-page link building and parsing', () => {
       amount: '3',
       memo: null,
       label: null,
+      created: null,
     });
   });
 });
@@ -426,12 +448,111 @@ describe('payment matching (address + CIP-20 memo + amount)', () => {
     assert.equal(paid.txHash, '9');
   });
 
-  it('treats an open-amount request as paid for any positive ADA with the memo', () => {
-    const result = findMatchingPayment(
+  it('treats an open-amount request as paid for at least 1 ADA with the memo', () => {
+    const short = findMatchingPayment(
       [tx({ value: '1', metadata: { '674': { msg: ['TIP'] } } })],
       { address: TESTNET_ADDR, amountLovelace: null, memo: 'TIP' }
     );
+    assert.equal(short.status, 'underpaid');
+    const result = findMatchingPayment(
+      [tx({ value: '1000000', metadata: { '674': { msg: ['TIP'] } } })],
+      { address: TESTNET_ADDR, amountLovelace: null, memo: 'TIP' }
+    );
     assert.equal(result.status, 'paid');
-    assert.equal(result.receivedLovelace, '1');
+    assert.equal(result.receivedLovelace, '1000000');
+  });
+
+  it('matches a long memo as a consecutive run of CIP-20 lines even if the wallet appends another line', () => {
+    const memo = 'A'.repeat(80);
+    const lines = splitCip20Msg(memo);
+    assert.ok(lines.length >= 2);
+    assert.equal(
+      memoMatches([...lines, 'Sent from Eternl'], memo),
+      true
+    );
+    assert.equal(
+      memoMatches(['Sent from Eternl', ...lines], memo),
+      true
+    );
+    assert.equal(memoMatches(['INV-42', 'extra'], 'INV-42-not-this'), false);
+  });
+
+  it('ignores a matching memo and amount when the transaction is older than the link created time', () => {
+    const result = findMatchingPayment(
+      [tx({ hash: 'aa', value: '5000000', metadata: { '674': { msg: ['INV-42'] } } })],
+      { address: TESTNET_ADDR, amountLovelace: 5_000_000n, memo: 'INV-42', created: 2_000_000_000 }
+    );
+    // tx() has no block_time, so it is not treated as too old
+    assert.equal(result.status, 'paid');
+    const old = {
+      tx_hash: 'bb',
+      block_time: 1_000,
+      metadata: { '674': { msg: ['INV-42'] } },
+      outputs: [{ payment_addr: { bech32: TESTNET_ADDR }, value: '5000000' }],
+    };
+    const skipped = findMatchingPayment(
+      [old],
+      { address: TESTNET_ADDR, amountLovelace: 5_000_000n, memo: 'INV-42', created: 2_000 }
+    );
+    assert.equal(skipped.status, 'unpaid');
+    assert.equal(matchPayment(old, { address: TESTNET_ADDR, amountLovelace: 5_000_000n, memo: 'INV-42', created: 2_000 }).tooOld, true);
+  });
+
+  it('caps labels at 60 characters and does not emit a trailing ?& in pay-page URLs', () => {
+    const url = buildPayPageUrl('https://example.com/ada-pay-links?', {
+      network: 'preprod',
+      address: TESTNET_ADDR,
+      amount: '1',
+      memo: 'INV-1',
+      label: 'x'.repeat(80),
+      created: 1700000000,
+    });
+    assert.equal(url.includes('?&'), false);
+    assert.equal(url.startsWith('https://example.com/ada-pay-links?'), true);
+    const parsed = parsePayPageUrl(url);
+    assert.equal(parsed.label.length, 60);
+    assert.equal(parsed.created, 1700000000);
+    assert.equal(capLabel('y'.repeat(80)).length, 60);
+  });
+
+  it('decodes CIP-19 network byte and payload length, not only the HRP prefix', () => {
+    const main = decodePaymentAddress(TIP_ADDRESS);
+    assert.equal(main.networkId, 1);
+    assert.equal(main.type, 0);
+    assert.equal(main.bytes.length, 57);
+    const test = decodePaymentAddress(TESTNET_ADDR);
+    assert.equal(test.networkId, 0);
+    assert.equal(test.bytes.length, 57);
+  });
+
+  it('blocks a wallet whose CIP-30 network id or address prefix does not match the link', () => {
+    assert.equal(
+      walletNetworkMismatch({ walletNetworkId: 0, changeAddress: TESTNET_ADDR, network: 'mainnet' }).includes('testnet'),
+      true
+    );
+    assert.equal(
+      walletNetworkMismatch({ walletNetworkId: 1, changeAddress: TIP_ADDRESS, network: 'preprod' }).includes('mainnet'),
+      true
+    );
+    assert.equal(
+      walletNetworkMismatch({ walletNetworkId: 1, changeAddress: TIP_ADDRESS, network: 'mainnet' }),
+      null
+    );
+    assert.equal(
+      walletNetworkMismatch({ walletNetworkId: 0, changeAddress: TIP_ADDRESS, network: 'preprod' }).includes('addr vs addr_test'),
+      true
+    );
+    assert.equal(MAINNET_WARNING, 'Mainnet: real ADA, unaudited software');
+    assert.equal(MAINNET_PAY_CONFIRM, 'This sends real ADA');
+  });
+
+  it('appends a short unique suffix to auto and required memos', () => {
+    const a = finalizeMemo('INV-42');
+    const b = finalizeMemo('INV-42');
+    assert.match(a, /^INV-42-[0-9a-f]{6}$/);
+    assert.notEqual(a, b);
+    const auto = finalizeMemo('');
+    assert.match(auto, /^APL-[0-9a-f]{12}-[0-9a-f]{6}$/);
+    assert.equal(generateMemoSuffix().length, 6);
   });
 });

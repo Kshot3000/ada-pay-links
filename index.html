@@ -9,12 +9,12 @@
 </head>
 <body>
   <header class="top">
-    <div class="brand">₳ ADA Pay <span>Links</span></div>
+    <div class="brand">₳ ADA Pay <span>Links</span> <em class="tag">in testing · unaudited</em></div>
     <label class="network-switch">Network
       <select id="network" aria-label="Cardano network">
         <option value="preprod" selected>Preprod testnet</option>
         <option value="preview">Preview testnet</option>
-        <option value="mainnet">Mainnet (not ready — see README)</option>
+        <option value="mainnet">Mainnet</option>
       </select>
     </label>
     <nav>
@@ -31,6 +31,7 @@
       <p class="muted small"><a href="#" id="pv-create-link">← Create your own link</a></p>
       <h1 id="pv-title">Payment request</h1>
       <p id="pv-detail" class="muted"></p>
+      <p id="pv-network-hint" class="banner-inline hidden"></p>
       <p class="mono break" id="pv-addr"></p>
       <div id="pv-qr" class="qr"></div>
       <p class="muted small">Scan to open this pay page on another device. The CIP-13 wallet URI (address + amount only, no memo) is also provided below.</p>
@@ -41,12 +42,12 @@
         <button id="pv-copy" class="btn ghost" type="button">Copy pay-page link</button>
       </div>
       <h2>Pay with a CIP-30 wallet</h2>
-      <p class="muted small">Lace, Eternl, or Nami. Set the wallet to the same network as this page. The memo is written as CIP-20 transaction metadata so the merchant can match the payment. This page never holds your keys or funds.</p>
+      <p class="muted small">Lace, Eternl, or another CIP-30 wallet. Set the wallet to the same network as this page (Preprod and Preview are different testnets). The memo is written as CIP-20 transaction metadata so the merchant can match the payment. This page never holds your keys or funds.</p>
       <label id="pv-amount-wrap" class="hidden">ADA to send
         <input id="pv-amount" type="text" inputmode="decimal" placeholder="Amount in ADA" autocomplete="off">
       </label>
       <div id="pv-wallets" class="wallet-list"></div>
-      <p id="pv-nowallet" class="muted small hidden">No CIP-30 wallet found. Install <a href="https://www.lace.io/" rel="noopener">Lace</a>, <a href="https://eternl.io/" rel="noopener">Eternl</a>, or <a href="https://namiwallet.io/" rel="noopener">Nami</a>, then reload. You can also open the CIP-13 URI above in a compatible wallet — that path does not attach the memo, so on-chain matching may fail.</p>
+      <p id="pv-nowallet" class="muted small hidden">No CIP-30 wallet found. Install <a href="https://www.lace.io/" rel="noopener">Lace</a> or <a href="https://eternl.io/" rel="noopener">Eternl</a>, then reload. You can also open the CIP-13 URI above in a compatible wallet — that path does not attach the memo, so on-chain matching may fail.</p>
       <p id="pv-pay-status" class="status"></p>
       <button id="pv-verify" class="btn ghost" type="button">Check if paid</button>
       <p id="pv-status" class="status"></p>
@@ -56,7 +57,7 @@
     <div id="desk">
       <section class="hero">
         <h1>Pay-with-ADA links for small businesses. <em>No backend. No custodian.</em></h1>
-        <p>Enter a receive address, an amount, and a memo. This page builds a shareable link and QR code, lets a payer send ADA from Lace, Eternl, or Nami with the memo on-chain, and checks payment status against a public Koios indexer. Testnet first — this project is in testing.</p>
+        <p>Enter a receive address, an amount, and a memo. This page builds a shareable link and QR code, lets a payer send ADA from Lace, Eternl, or another CIP-30 wallet with the memo on-chain, and checks payment status through a configurable Koios or Blockfrost checker (via an optional Worker proxy). Testnet first — this project is in testing.</p>
       </section>
 
       <section id="create" class="card">
@@ -110,7 +111,7 @@
 
       <section id="verify" class="card">
         <h2>2 · Check payment status</h2>
-        <p class="muted">Paste a pay-page link (or a CIP-13 URI plus a memo) and this page looks the payment up on Koios by receive address and CIP-20 memo, then checks that at least the requested ADA arrived.</p>
+        <p class="muted">Paste a pay-page link (or a CIP-13 URI plus a memo) and this page looks the payment up by receive address and CIP-20 memo, then checks that at least the requested ADA arrived. If the network checker cannot be reached, you will get a Cardanoscan link instead.</p>
         <form id="ver-form">
           <label>Payment link (pay-page URL or web+cardano: URI)
             <input id="v-link" class="mono" type="text" placeholder="https://…?address=… or web+cardano:…" autocomplete="off" spellcheck="false">
@@ -136,7 +137,7 @@
           <li><strong>Link.</strong> The desk builds a hosted pay-page URL (<span class="mono">?network=…&amp;address=…&amp;amount=…&amp;memo=…</span>) and a CIP-13 URI (<span class="mono">web+cardano:&lt;address&gt;?amount=…</span>) for wallets that support it.</li>
           <li><strong>QR.</strong> The pay-page URL is rendered as a QR code locally in your browser (vendored MIT QR library; nothing is uploaded).</li>
           <li><strong>Pay.</strong> The payer connects a CIP-30 wallet. The transaction sends ADA to your address and writes the memo as CIP-20 metadata (label 674). No funds ever pass through this site.</li>
-          <li><strong>Verify.</strong> Status is checked through public Koios by address + memo, then the received ADA is compared to the requested amount. A transaction link is shown when a match is found.</li>
+          <li><strong>Verify.</strong> Status is checked through a Koios or Blockfrost API (via the optional Cloudflare Worker proxy, because public Koios hides CORS on actual responses) by address + memo, then the received ADA is compared to the requested amount. A transaction link is shown when a match is found.</li>
         </ol>
         <p class="muted small">No server, no sign-up, no custody, no secrets in this repo. Always double-check the receive address and the network in your wallet before paying. This software is in testing and is not audited.</p>
       </section>
@@ -146,7 +147,7 @@
   <footer>
     <div class="tip-box">
       <h2>Tip / Support the dev</h2>
-      <p>Optional mainnet ADA tips are welcome and unlock nothing — this tool is free, including in any later Android build. This is not a donation button and not a payout address for payments you collect.</p>
+      <p>Optional mainnet ADA tips are welcome and unlock nothing — this tool is free, including in any later Android build. This is not a payout address for payments you collect.</p>
       <p class="mono break" id="tip-addr"></p>
       <div class="actions">
         <button id="tip-copy" class="btn tip" type="button">Copy tip address</button>
