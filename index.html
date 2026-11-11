@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ADA Pay Links — payment links + QR for Cardano (testnet, in testing)</title>
+  <meta name="description" content="Create pay-with-ADA links and QR codes, pay from a CIP-30 wallet, and verify incoming payments on a public Cardano indexer. Free, open source, no backend, no custodian. Testnet first; this project is in testing.">
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">₳ ADA Pay <span>Links</span> <em class="tag">in testing · unaudited</em></div>
+    <label class="network-switch">Network
+      <select id="network" aria-label="Cardano network">
+        <option value="preprod" selected>Preprod testnet</option>
+        <option value="preview">Preview testnet</option>
+        <option value="mainnet">Mainnet</option>
+      </select>
+    </label>
+    <nav>
+      <a href="#create">Create</a>
+      <a href="#verify">Verify</a>
+      <a href="#saved">Saved</a>
+      <a href="https://github.com/Kshot3000/ada-pay-links" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+  <p id="net-banner" class="banner">This is a testnet build, in testing and unaudited. Use Preprod or Preview. Do not send real mainnet funds unless you fully understand the risk.</p>
+
+  <main>
+    <section id="payview" class="card hidden" aria-live="polite">
+      <p class="muted small"><a href="#" id="pv-create-link">← Create your own link</a></p>
+      <h1 id="pv-title">Payment request</h1>
+      <p id="pv-detail" class="muted"></p>
+      <p id="pv-network-hint" class="banner-inline hidden"></p>
+      <p class="mono break" id="pv-addr"></p>
+      <div id="pv-qr" class="qr"></div>
+      <p class="muted small">Scan to open this pay page on another device. The CIP-13 wallet URI (address + amount only, no memo) is also provided below.</p>
+      <p class="mono small break" id="pv-page"></p>
+      <p class="mono small break" id="pv-cip13"></p>
+      <div class="actions">
+        <a id="pv-open" class="btn" href="#">Open CIP-13 URI in wallet</a>
+        <button id="pv-copy" class="btn ghost" type="button">Copy pay-page link</button>
+      </div>
+      <h2>Pay with a CIP-30 wallet</h2>
+      <p class="muted small">Lace, Eternl, or another CIP-30 wallet. Set the wallet to the same network as this page (Preprod and Preview are different testnets). The memo is written as CIP-20 transaction metadata so the merchant can match the payment. This page never holds your keys or funds.</p>
+      <label id="pv-amount-wrap" class="hidden">ADA to send
+        <input id="pv-amount" type="text" inputmode="decimal" placeholder="Amount in ADA" autocomplete="off">
+      </label>
+      <div id="pv-wallets" class="wallet-list"></div>
+      <p id="pv-nowallet" class="muted small hidden">No CIP-30 wallet found. Install <a href="https://www.lace.io/" rel="noopener">Lace</a> or <a href="https://eternl.io/" rel="noopener">Eternl</a>, then reload. You can also open the CIP-13 URI above in a compatible wallet — that path does not attach the memo, so on-chain matching may fail.</p>
+      <p id="pv-pay-status" class="status"></p>
+      <button id="pv-verify" class="btn ghost" type="button">Check if paid</button>
+      <p id="pv-status" class="status"></p>
+      <p id="pv-ver-detail" class="small muted"></p>
+    </section>
+
+    <div id="desk">
+      <section class="hero">
+        <h1>Pay-with-ADA links for small businesses. <em>No backend. No custodian.</em></h1>
+        <p>Enter a receive address, an amount, and a memo. This page builds a shareable link and QR code, lets a payer send ADA from Lace, Eternl, or another CIP-30 wallet with the memo on-chain, and checks payment status through a configurable Koios or Blockfrost checker (via an optional Worker proxy). Testnet first — this project is in testing.</p>
+      </section>
+
+      <section id="create" class="card">
+        <h2>1 · Create a payment link</h2>
+        <form id="gen-form">
+          <label>Your Cardano receive address
+            <input id="f-address" class="mono" type="text" placeholder="addr_test1… on testnet, or addr1… on mainnet" autocomplete="off" spellcheck="false" required>
+          </label>
+          <div class="row">
+            <label>Amount (ADA)
+              <input id="f-amount" type="text" inputmode="decimal" placeholder="25.00" autocomplete="off">
+            </label>
+            <label>Or USD (optional, converted approximately)
+              <input id="f-usd" type="text" inputmode="decimal" placeholder="9.00" autocomplete="off">
+            </label>
+          </div>
+          <div class="actions">
+            <button id="f-convert" class="btn ghost" type="button">Convert USD → ADA</button>
+          </div>
+          <p id="f-fx" class="small muted"></p>
+          <div class="row">
+            <label>Memo / invoice id (stored on-chain as CIP-20 metadata)
+              <input id="f-memo" type="text" placeholder="INV-1234 (leave blank to auto-generate)" maxlength="200" autocomplete="off">
+            </label>
+            <label>Label (optional, shown on the pay page)
+              <input id="f-label" type="text" placeholder="My shop" maxlength="60" autocomplete="off">
+            </label>
+          </div>
+          <p class="muted small">A memo is required so the payment can be found later. If you leave it blank, a unique id such as <span class="mono">APL-…</span> is generated for you. Amount is optional (open-amount links). USD conversion uses a free public market price and is clearly approximate — the link always stores ADA, never USD.</p>
+          <button class="btn" type="submit">Generate link + QR</button>
+          <p id="gen-error" class="error"></p>
+        </form>
+
+        <div id="gen-result" class="hidden">
+          <h3>Your payment link</h3>
+          <p class="mono break" id="r-url"></p>
+          <div class="row actions">
+            <button id="r-copy" class="btn ghost" type="button">Copy pay-page link</button>
+            <button id="r-save" class="btn ghost" type="button">Save to this device</button>
+            <a id="r-page" class="btn ghost" href="#" target="_blank" rel="noopener">Open pay page</a>
+          </div>
+          <div id="r-qr" class="qr"></div>
+          <p class="small muted">CIP-13 wallet URI (address + amount only; wallets that open this directly will not attach the memo):</p>
+          <p class="mono break" id="r-cip13"></p>
+          <p class="small muted">Memo: <span class="mono" id="r-memo"></span></p>
+          <h3>Embed on your site</h3>
+          <pre id="r-embed" class="embed"></pre>
+          <button id="r-copy-embed" class="btn ghost" type="button">Copy embed snippet</button>
+        </div>
+      </section>
+
+      <section id="verify" class="card">
+        <h2>2 · Check payment status</h2>
+        <p class="muted">Paste a pay-page link (or a CIP-13 URI plus a memo) and this page looks the payment up by receive address and CIP-20 memo, then checks that at least the requested ADA arrived. If the network checker cannot be reached, you will get a Cardanoscan link instead.</p>
+        <form id="ver-form">
+          <label>Payment link (pay-page URL or web+cardano: URI)
+            <input id="v-link" class="mono" type="text" placeholder="https://…?address=… or web+cardano:…" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="hidden" id="v-memo-wrap">Memo (required if you pasted a CIP-13 URI, which cannot carry one)
+            <input id="v-memo" type="text" placeholder="INV-1234" autocomplete="off">
+          </label>
+          <button class="btn" type="submit">Check payment</button>
+        </form>
+        <p id="ver-status" class="status"></p>
+        <p id="ver-detail" class="small muted"></p>
+      </section>
+
+      <section id="saved" class="card">
+        <h2>3 · Saved links (this device only)</h2>
+        <ul id="saved-list" class="saved"></ul>
+        <p id="saved-empty" class="muted small">Nothing saved yet. Saved links live in your browser's local storage — nowhere else.</p>
+      </section>
+
+      <section class="card">
+        <h2>How it works</h2>
+        <ol class="how">
+          <li><strong>Link.</strong> The desk builds a hosted pay-page URL (<span class="mono">?network=…&amp;address=…&amp;amount=…&amp;memo=…</span>) and a CIP-13 URI (<span class="mono">web+cardano:&lt;address&gt;?amount=…</span>) for wallets that support it.</li>
+          <li><strong>QR.</strong> The pay-page URL is rendered as a QR code locally in your browser (vendored MIT QR library; nothing is uploaded).</li>
+          <li><strong>Pay.</strong> The payer connects a CIP-30 wallet. The transaction sends ADA to your address and writes the memo as CIP-20 metadata (label 674). No funds ever pass through this site.</li>
+          <li><strong>Verify.</strong> Status is checked through a Koios or Blockfrost API (via the optional Cloudflare Worker proxy, because public Koios hides CORS on actual responses) by address + memo, then the received ADA is compared to the requested amount. A transaction link is shown when a match is found.</li>
+        </ol>
+        <p class="muted small">No server, no sign-up, no custody, no secrets in this repo. Always double-check the receive address and the network in your wallet before paying. This software is in testing and is not audited.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="tip-box">
+      <h2>Tip / Support the dev</h2>
+      <p>Optional mainnet ADA tips are welcome and unlock nothing — this tool is free, including in any later Android build. This is not a payout address for payments you collect.</p>
+      <p class="mono break" id="tip-addr"></p>
+      <div class="actions">
+        <button id="tip-copy" class="btn tip" type="button">Copy tip address</button>
+        <a id="tip-open" class="btn ghost" href="#">Open tip URI in wallet</a>
+      </div>
+    </div>
+    <p>Built by <a href="https://x.com/kshot9000" rel="noopener">@kshot9000</a> ·
+      <a href="https://github.com/Kshot3000/ada-pay-links" rel="noopener">Source (MIT)</a> ·
+      Cardano testnet first, in testing, unaudited.</p>
+  </footer>
+
+  <script src="./vendor/qrcode.js"></script>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

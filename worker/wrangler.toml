@@ -1,0 +1,10 @@
+name = "ada-pay-links-checker"
+main = "src/index.js"
+compatibility_date = "2026-11-10"
+
+# Public config only. Put API tokens in Worker secrets, never in this file:
+#   npx wrangler secret put KOIOS_API_TOKEN
+#   or
+#   npx wrangler secret put BLOCKFROST_PROJECT_ID
+[vars]
+CHECKER_PROVIDER = "koios"
