@@ -29,6 +29,7 @@ import {
   walletNetworkMismatch,
   MAINNET_WARNING,
   MAINNET_PAY_CONFIRM,
+  allowCip13Open,
   buildCip13Uri,
   parseCip13Uri,
   buildPayPageQuery,
@@ -544,6 +545,17 @@ describe('payment matching (address + CIP-20 memo + amount)', () => {
     );
     assert.equal(MAINNET_WARNING, 'Mainnet: real ADA, unaudited software');
     assert.equal(MAINNET_PAY_CONFIRM, 'This sends real ADA');
+  });
+
+  it('requires This sends real ADA before opening a mainnet CIP-13 wallet link', () => {
+    const calls = [];
+    assert.equal(allowCip13Open('preprod', (msg) => { calls.push(msg); return false; }), true);
+    assert.equal(allowCip13Open('preview', (msg) => { calls.push(msg); return false; }), true);
+    assert.deepEqual(calls, []);
+    assert.equal(allowCip13Open('mainnet', (msg) => { calls.push(msg); return false; }), false);
+    assert.deepEqual(calls, [MAINNET_PAY_CONFIRM]);
+    assert.equal(allowCip13Open('mainnet', () => true), true);
+    assert.equal(allowCip13Open('mainnet'), false);
   });
 
   it('appends a short unique suffix to auto and required memos', () => {

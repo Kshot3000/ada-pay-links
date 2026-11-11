@@ -6,9 +6,19 @@ import {
   installedWallets,
   utxoTxHashes,
   testnetAmbiguityWarning,
+  TESTNET_UNCHECKED_CONFIRM,
   probeWalletOnLinkNetwork,
+  inspectWalletForPayment,
 } from '../src/wallet.js';
-import { describeWalletError, isUserDeclined, CANCELLED_MESSAGE } from '../src/wallet-errors.js';
+import {
+  describeWalletError,
+  isUserDeclined,
+  CANCELLED_MESSAGE,
+  CONNECT_FAILED_MESSAGE,
+} from '../src/wallet-errors.js';
+
+const TESTNET_ADDR =
+  'addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp';
 
 const HASH = 'ab'.repeat(32);
 
@@ -63,6 +73,30 @@ describe('testnet ambiguity', () => {
   });
 });
 
+describe('testnet confirm without a Worker', () => {
+  it("says we couldn't check which test network the wallet is on", async () => {
+    assert.equal(TESTNET_UNCHECKED_CONFIRM, "We couldn't check which test network your wallet is on");
+    const warning = testnetAmbiguityWarning('preprod', { checked: false });
+    assert.match(warning, /we couldn't check which test network your wallet is on/i);
+    assert.match(warning, /Preprod/);
+    const withWorker = testnetAmbiguityWarning('preprod', { checked: true });
+    assert.equal(/couldn't check/i.test(withWorker), false);
+
+    const wallet = {
+      getNetworkId: async () => 0,
+      getChangeAddress: async () => TESTNET_ADDR,
+      getUtxos: async () => [{ input: { txHash: HASH } }],
+    };
+    const inspection = await inspectWalletForPayment({
+      wallet,
+      network: 'preprod',
+      config: {},
+    });
+    assert.match(inspection.warning, /we couldn't check which test network your wallet is on/i);
+    assert.equal(inspection.mismatchLikely, false);
+  });
+});
+
 describe('CIP-30 error text', () => {
   it('shows a cancelled message for user-declined sign errors and never [object Object]', () => {
     assert.equal(CANCELLED_MESSAGE, 'You cancelled in the wallet');
@@ -80,5 +114,25 @@ describe('CIP-30 error text', () => {
     assert.equal(describeWalletError({ code: 1, info: 'Invalid request' }), 'Invalid request');
     assert.equal(describeWalletError({}), 'The wallet reported an error.');
     assert.notEqual(describeWalletError({ code: 1 }), '[object Object]');
+  });
+
+  it('shows a friendly message for Mesh connect failures, never the raw JSON wrapper', () => {
+    const refused = new Error('[BrowserWallet] An error occurred during enable: {"code":3,"info":"Refused"}');
+    assert.equal(describeWalletError(refused), CANCELLED_MESSAGE);
+    assert.equal(describeWalletError(refused, { stage: 'connect' }), CANCELLED_MESSAGE);
+    assert.equal(isUserDeclined(refused), true);
+
+    const emptyWrap = new Error('[BrowserWallet] An error occurred during enable: {}');
+    assert.equal(describeWalletError(emptyWrap, { stage: 'connect' }), CONNECT_FAILED_MESSAGE);
+    assert.equal(String(describeWalletError(emptyWrap, { stage: 'connect' })).includes('{'), false);
+    assert.equal(String(describeWalletError(emptyWrap, { stage: 'connect' })).includes('[BrowserWallet]'), false);
+    assert.equal(String(describeWalletError(emptyWrap, { stage: 'connect' })).includes('[object Object]'), false);
+
+    const other = new Error('[BrowserWallet] An error occurred during enable: {"code":1,"info":"Invalid request"}');
+    const msg = describeWalletError(other, { stage: 'connect' });
+    assert.equal(msg, CONNECT_FAILED_MESSAGE);
+    assert.equal(msg.includes('Invalid request'), false);
+    assert.equal(msg.includes('{'), false);
+    assert.equal(msg.includes('JSON'), false);
   });
 });

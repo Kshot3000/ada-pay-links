@@ -72,6 +72,15 @@ export const DEFAULT_NETWORK = 'preprod';
 export const MAINNET_WARNING = 'Mainnet: real ADA, unaudited software';
 export const MAINNET_PAY_CONFIRM = 'This sends real ADA';
 
+/**
+ * CIP-13 "Open in wallet" on a mainnet pay page must ask the same confirm
+ * as Pay with wallet. Testnet opens without that prompt.
+ */
+export function allowCip13Open(network, confirmFn) {
+  if (getNetwork(network)?.kind !== 'mainnet') return true;
+  if (typeof confirmFn !== 'function') return false;
+  return !!confirmFn(MAINNET_PAY_CONFIRM);
+}
 
 /**
  * Block a CIP-30 wallet that is on the wrong network.
