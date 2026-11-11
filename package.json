@@ -1,0 +1,24 @@
+{
+  "name": "ada-pay-links",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pay-with-ADA links and QR codes for Cardano. Testnet first, zero backend, no custodian.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@meshsdk/core": "^1.9.1"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5",
+    "vite-plugin-node-polyfills": "^0.28.0"
+  }
+}
