@@ -52,9 +52,12 @@ network switch is the source of truth. The pay page always names the testnet
 the link expects. When the Worker proxy is configured, the desk also looks up
 one of the wallet's UTxO transaction hashes on that network and warns if it is
 not found (a Preview wallet paying a Preprod link, or the other way around).
-A mainnet wallet is blocked from paying a testnet link, and the other way
-around, using both `getNetworkId()` and the address header / `addr` vs
-`addr_test` prefix.
+If the Worker is not configured, the testnet confirm still runs and says we
+couldn't check which test network your wallet is on. A mainnet wallet is
+blocked from paying a testnet link, and the other way around, using both
+`getNetworkId()` and the address header / `addr` vs `addr_test` prefix.
+On a mainnet pay page, **Open CIP-13 URI in wallet** asks `This sends real ADA`
+before opening the URI, the same confirm used before signing.
 
 ## Why the Worker proxy exists
 
@@ -63,10 +66,13 @@ Public Koios answers a CORS **preflight** (`OPTIONS`) with
 that header**. A browser therefore cannot read the body — this was confirmed
 with Origin `https://kshot3000.github.io` against `https://preprod.koios.rest`.
 The optional Worker in `/worker` injects a Koios or Blockfrost API token from a
-**secret** (never committed) and always returns CORS headers, including on
-errors. Mesh `KoiosProvider` also fetches `tip` and `epoch_params` during
-`.complete()`, so when `proxyBase` is set the pay path points Mesh at the same
-Worker base.
+**secret** (never committed) and returns CORS headers only for allowlisted
+origins (default `https://kshot3000.github.io`, plus `http://localhost` and
+`http://127.0.0.1` for local dev), including on errors. Any other origin gets
+403 and is not proxied. Submit paths are not proxied; wallets submit
+transactions themselves. Mesh `KoiosProvider` also fetches `tip` and
+`epoch_params` during `.complete()`, so when `proxyBase` is set the pay path
+points Mesh at the same Worker base.
 
 The `Range` header is ignored by Koios (it returns 1000 rows). Lookups use
 `/address_txs?limit=50&order=block_height.desc`, retry on HTTP 429, and stop
@@ -82,6 +88,7 @@ cd worker
 npx wrangler secret put KOIOS_API_TOKEN
 # or: npx wrangler secret put BLOCKFROST_PROJECT_ID
 # wrangler.toml CHECKER_PROVIDER = "koios" or "blockfrost"
+# optional: ALLOWED_ORIGINS = "https://kshot3000.github.io,http://localhost"
 npx wrangler deploy
 ```
 
@@ -176,7 +183,7 @@ Coverage includes:
 - CIP-30 wallet listing (no Nami), network-id / address-prefix guards, testnet probe
 - wallet error text (`You cancelled in the wallet`, never `[object Object]`)
 - XSS-safe status rendering (tx hashes must be 64 hex characters)
-- Worker path allowlisting and CORS / secret injection
+- Worker path allowlisting, origin allowlist CORS, rejected submit routes, and secret injection
 
 Wallet signing against a live network is not in CI; that needs a real testnet wallet.
 

@@ -8,3 +8,8 @@ compatibility_date = "2026-11-10"
 #   npx wrangler secret put BLOCKFROST_PROJECT_ID
 [vars]
 CHECKER_PROVIDER = "koios"
+# Comma-separated browser origins allowed to use the proxy. When unset, the
+# Worker defaults to https://kshot3000.github.io plus http://localhost and
+# http://127.0.0.1 (any port) for local dev. Other origins get 403 and are
+# not proxied.
+# ALLOWED_ORIGINS = "https://kshot3000.github.io,http://localhost,http://127.0.0.1"

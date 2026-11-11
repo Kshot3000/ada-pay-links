@@ -3,6 +3,7 @@ import {
   TIP_ADDRESS,
   MAINNET_WARNING,
   MAINNET_PAY_CONFIRM,
+  allowCip13Open,
   getNetwork,
   isPaymentAddress,
   addressMatchesNetwork,
@@ -316,6 +317,11 @@ function renderPayView(request) {
   $('pv-page').textContent = pageUrl;
   $('pv-cip13').textContent = cip13;
   $('pv-open').href = cip13;
+  $('pv-open').onclick = function (ev) {
+    if (!allowCip13Open(request.network, (msg) => window.confirm(msg))) {
+      ev.preventDefault();
+    }
+  };
   qrInto($('pv-qr'), pageUrl);
   $('pv-copy').onclick = function () { copyText(pageUrl, this); };
   $('pv-amount-wrap').classList.toggle('hidden', !!request.amount);

@@ -59,16 +59,21 @@ export function utxoTxHashes(utxos) {
   return [...new Set(hashes)];
 }
 
-export function testnetAmbiguityWarning(network) {
+export const TESTNET_UNCHECKED_CONFIRM = "We couldn't check which test network your wallet is on";
+
+export function testnetAmbiguityWarning(network, { checked } = {}) {
   const net = getNetwork(network);
   if (!net || net.kind !== 'testnet') return null;
-  return (
+  const reminder =
     'This payment is for ' +
     net.label +
     '. CIP-30 wallets use the same network id for Preprod and Preview, so confirm the wallet is set to ' +
     net.label +
-    ' before signing.'
-  );
+    ' before signing.';
+  if (checked === false) {
+    return TESTNET_UNCHECKED_CONFIRM + '. ' + reminder;
+  }
+  return reminder;
 }
 
 /**
@@ -132,6 +137,8 @@ export async function inspectWalletForPayment({ wallet, network, config, fetchIm
         "This wallet's recent transactions were not found on " +
         net.label +
         '. It may be on the other testnet (Preprod vs Preview). A payment sent on the wrong testnet will not show as paid here.';
+    } else if (!probe.checked) {
+      inspection.warning = testnetAmbiguityWarning(network, { checked: false });
     }
   }
   return inspection;
@@ -173,7 +180,7 @@ export async function payWithWallet({ walletId, network, address, amount, memo, 
   try {
     wallet = await BrowserWallet.enable(walletId);
   } catch (e) {
-    throw new Error(describeWalletError(e));
+    throw new Error(describeWalletError(e, { stage: 'connect' }));
   }
 
   const inspection = await inspectWalletForPayment({ wallet, network, config, fetchImpl });
